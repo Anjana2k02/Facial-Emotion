@@ -1,66 +1,88 @@
 import cv2
 import numpy as np
-import tensorflow as tf
+import threading
+import time
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from keras.models import load_model
+from typing import Generator
+import asyncio 
+from sse_starlette.sse import EventSourceResponse
 
-# Load the trained model
+
+
+app = FastAPI()
+
+# Load model and face detector
 model = load_model('model_file_30epochs.h5')
-
-# Open webcam
-video = cv2.VideoCapture(0)
-if not video.isOpened():
-    print("Error: Could not open webcam.")
-    exit()
-
-# Load face detection cascade
 face_cascade_path = 'haarcascade_frontalface_default.xml'
-faceDetect = cv2.CascadeClassifier(face_cascade_path)
-
-if faceDetect.empty():
-    print("Error: Haarcascade file not found!")
-    exit()
-
-# Emotion labels
+face_cascade = cv2.CascadeClassifier(face_cascade_path)
 labels_dict = {0: 'Angry', 1: 'Disgust', 2: 'Fear', 3: 'Happy', 4: 'Neutral', 5: 'Sad', 6: 'Surprise'}
 
-while True:
-    ret, frame = video.read()
-    
-    if not ret:
-        print("Error: Failed to capture image")
-        break
+# Shared variable for camera frame
+latest_prediction = -1
 
-    # Convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+# Frame rate control (e.g., 10 FPS)
+FRAME_INTERVAL = 1.0 / 10  # 10 frames per second
 
-    # Detect faces
-    faces = faceDetect.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=3)
+# Threaded video capture
+cap = cv2.VideoCapture(0)
+def capture_emotion_loop():
+    global latest_prediction
+    while True:
+        start_time = time.time()
 
-    for x, y, w, h in faces:
-        # Extract face region
-        sub_face_img = gray[y:y+h, x:x+w]
+        ret, frame = cap.read()
+        if not ret:
+            latest_prediction = -1
+            continue
 
-        # Resize face to match model input
-        resized = cv2.resize(sub_face_img, (48, 48))
-        normalize = resized / 255.0  # Normalize pixel values
-        reshaped = np.reshape(normalize, (1, 48, 48, 1))  # Reshape for model input
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=3)
 
-        # Predict emotion
-        result = model.predict(reshaped)
-        label = np.argmax(result, axis=1)[0]
+        if len(faces) == 0:
+            latest_prediction = -1  # No face found
+        else:
+            for x, y, w, h in faces:
+                face_img = gray[y:y+h, x:x+w]
+                resized = cv2.resize(face_img, (48, 48))
+                normalized = resized / 255.0
+                reshaped = np.reshape(normalized, (1, 48, 48, 1))
+                result = model.predict(reshaped, verbose=0)
+                label = int(np.argmax(result, axis=1)[0])
+                latest_prediction = label
+                break  # Only process the first face
 
-        # Draw face rectangle & label
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
-        cv2.rectangle(frame, (x, y-40), (x+w, y), (50, 50, 255), -1)
-        cv2.putText(frame, labels_dict[label], (x+5, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        elapsed = time.time() - start_time
+        time_to_wait = FRAME_INTERVAL - elapsed
+        if time_to_wait > 0:
+            time.sleep(time_to_wait)
 
-    # Show the output
-    cv2.imshow("Facial Emotion Detection", frame)
 
-    # Press 'q' to exit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+# Start background thread
+threading.Thread(target=capture_emotion_loop, daemon=True).start()
 
-# Cleanup
-video.release()
-cv2.destroyAllWindows()
+# Streaming generator
+def prediction_stream() -> Generator[str, None, None]:
+    async def gen():
+        while True:
+            yield f"data: {latest_prediction}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+@app.get("/stream_status")
+async def stream_status():
+    async def event_generator():
+        prev_value = None
+        while True:
+            if latest_prediction != prev_value:
+                yield f"data: {latest_prediction}\n\n"
+                prev_value = latest_prediction
+            await asyncio.sleep(0.5)
+    return EventSourceResponse(event_generator())
+
+# Graceful shutdown
+import atexit
+@atexit.register
+def cleanup():
+    cap.release()
+    cv2.destroyAllWindows()
