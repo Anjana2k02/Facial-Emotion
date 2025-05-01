@@ -12,7 +12,8 @@ face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 labels_dict = {0: 'Angry', 1: 'Disgust', 2: 'Fear', 3: 'Happy', 4: 'Neutral', 5: 'Sad', 6: 'Surprise'}
 
 # Read the input image
-frame = cv2.imread("faces-smallus.jpg")
+# faces-
+frame = cv2.imread("2.jpg")
 if frame is None:
     print("Error: Image not found or unable to load.")
     exit()
