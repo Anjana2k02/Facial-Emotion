@@ -2,31 +2,38 @@ import cv2
 import numpy as np
 import threading
 import time
+import asyncio
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
 from keras.models import load_model
-from typing import Generator
-import asyncio 
 from sse_starlette.sse import EventSourceResponse
 
-
+# middleware
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+# give access to localhost 5173 (Vite default port)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 # Load model and face detector
 model = load_model('model_file_30epochs.h5')
-face_cascade_path = 'haarcascade_frontalface_default.xml'
-face_cascade = cv2.CascadeClassifier(face_cascade_path)
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 labels_dict = {0: 'Angry', 1: 'Disgust', 2: 'Fear', 3: 'Happy', 4: 'Neutral', 5: 'Sad', 6: 'Surprise'}
 
-# Shared variable for camera frame
+# Shared state
 latest_prediction = -1
+FRAME_INTERVAL = 1.0 / 10  # 10 FPS
 
-# Frame rate control (e.g., 10 FPS)
-FRAME_INTERVAL = 1.0 / 10  # 10 frames per second
-
-# Threaded video capture
+# Start webcam
 cap = cv2.VideoCapture(0)
+
 def capture_emotion_loop():
     global latest_prediction
     while True:
@@ -41,7 +48,7 @@ def capture_emotion_loop():
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=3)
 
         if len(faces) == 0:
-            latest_prediction = -1  # No face found
+            latest_prediction = -1
         else:
             for x, y, w, h in faces:
                 face_img = gray[y:y+h, x:x+w]
@@ -51,38 +58,43 @@ def capture_emotion_loop():
                 result = model.predict(reshaped, verbose=0)
                 label = int(np.argmax(result, axis=1)[0])
                 latest_prediction = label
-                break  # Only process the first face
+                break
 
         elapsed = time.time() - start_time
-        time_to_wait = FRAME_INTERVAL - elapsed
-        if time_to_wait > 0:
-            time.sleep(time_to_wait)
+        if elapsed < FRAME_INTERVAL:
+            time.sleep(FRAME_INTERVAL - elapsed)
 
-
-# Start background thread
+# Start background capture thread
 threading.Thread(target=capture_emotion_loop, daemon=True).start()
 
-# Streaming generator
-def prediction_stream() -> Generator[str, None, None]:
-    async def gen():
-        while True:
-            yield f"data: {latest_prediction}\n\n"
-    return StreamingResponse(gen(), media_type="text/event-stream")
+from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import StreamingResponse
 
 @app.get("/stream_status")
 async def stream_status():
     async def event_generator():
+        global latest_prediction
         prev_value = None
         while True:
             if latest_prediction != prev_value:
-                yield f"data: {latest_prediction}\n\n"
+                yield f"{latest_prediction}\n\n"
                 prev_value = latest_prediction
             await asyncio.sleep(0.5)
+
     return EventSourceResponse(event_generator())
 
-# Graceful shutdown
+
+# Clean up
 import atexit
 @atexit.register
 def cleanup():
     cap.release()
     cv2.destroyAllWindows()
+
+
+# uvicorn server:app --reload  
+# 
+
+@app.get("/test")
+async def say_hello():
+    return {"test": "Fireeeeee"}
