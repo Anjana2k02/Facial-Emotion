@@ -4,7 +4,8 @@ import tensorflow as tf
 from keras.models import load_model
 
 # Load the trained model
-model = load_model('model_file_30epochs.h5')
+# model = load_model('model_file_30epochs.h5')
+model = load_model('FER_model.h5')
 
 # Open webcam
 video = cv2.VideoCapture(0)
